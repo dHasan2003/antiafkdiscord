@@ -1,5 +1,4 @@
 import discord
-from discord.ext import commands, tasks
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -12,63 +11,73 @@ CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID"))
 intents = discord.Intents.default()
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+client = discord.Client(intents=intents)
 
 
-@bot.event
-async def on_ready():
-    print(f"✅ Bot conectado como: {bot.user}")
-    print(f"🔊 Intentando unirse al canal de voz ID: {CHANNEL_ID}")
-    await join_and_stay()
-    stay_in_channel.start()
+async def connect_to_channel():
+    """Conecta al canal de voz, limpiando cualquier sesión previa."""
+    await client.wait_until_ready()
+    channel = client.get_channel(CHANNEL_ID)
 
-
-async def join_and_stay():
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel is None:
-        print("❌ No se encontró el canal. Verifica el VOICE_CHANNEL_ID.")
-        return
-
-    if not isinstance(channel, discord.VoiceChannel):
-        print("❌ El canal especificado no es un canal de voz.")
-        return
-
-    # Conectar si no está conectado
-    guild = channel.guild
-    voice_client = guild.voice_client
-
-    if voice_client is None:
-        await channel.connect()
-        print(f"✅ Conectado al canal: {channel.name}")
-    elif voice_client.channel != channel:
-        await voice_client.move_to(channel)
-        print(f"✅ Movido al canal: {channel.name}")
-
-
-@tasks.loop(seconds=30)
-async def stay_in_channel():
-    """Cada 30 segundos verifica que el bot siga en el canal."""
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel is None:
-        return
+    if channel is None or not isinstance(channel, discord.VoiceChannel):
+        print("❌ Canal no encontrado.")
+        return False
 
     guild = channel.guild
-    voice_client = guild.voice_client
+    vc = guild.voice_client
 
-    if voice_client is None or not voice_client.is_connected():
-        print("⚠️  Bot desconectado. Reconectando...")
-        await join_and_stay()
-    else:
-        print(f"🟢 Activo en: {voice_client.channel.name}")
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    """Si el bot es expulsado del canal, vuelve a entrar."""
-    if member == bot.user and after.channel is None:
-        print("⚠️  El bot fue expulsado. Volviendo a entrar...")
+    # Desconectar limpiamente si hay sesión colgada
+    if vc is not None:
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
         await asyncio.sleep(3)
-        await join_and_stay()
+
+    try:
+        # reconnect=False para que NO intente reconectar solo (lo manejamos nosotros)
+        await channel.connect(reconnect=False, self_deaf=True)
+        print(f"✅ Conectado a: {channel.name}")
+        return True
+    except Exception as e:
+        print(f"❌ Error al conectar: {e}")
+        return False
 
 
-bot.run(TOKEN)
+async def watch_loop():
+    """Loop principal que vigila la conexión cada 15 segundos."""
+    await client.wait_until_ready()
+    await asyncio.sleep(3)  # esperar que on_ready termine de conectar
+
+    while True:
+        try:
+            channel = client.get_channel(CHANNEL_ID)
+            if channel is None:
+                await asyncio.sleep(15)
+                continue
+
+            vc = channel.guild.voice_client
+
+            if vc is None or not vc.is_connected():
+                print("🔄 Sin conexión. Reconectando en 5s...")
+                await asyncio.sleep(5)
+                await connect_to_channel()
+            else:
+                print(f"🟢 Activo en: {vc.channel.name}")
+
+        except Exception as e:
+            print(f"⚠️ Error en watch_loop: {e}")
+
+        await asyncio.sleep(15)
+
+
+@client.event
+async def on_ready():
+    print(f"✅ Bot listo: {client.user}")
+    ok = await connect_to_channel()
+    if not ok:
+        print("⚠️ Conexión inicial fallida, el loop intentará reconectar.")
+    client.loop.create_task(watch_loop())
+
+
+client.run(TOKEN, reconnect=True)
